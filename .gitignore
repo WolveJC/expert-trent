@@ -39,3 +39,18 @@
 
 # debug information files
 *.dwo
+
+# Binary and compilation
+build/
+bin/
+*.o
+*.out
+scheduler_engine
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# System
+/dev/shm/disk_scheduler_shm
