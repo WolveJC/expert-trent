@@ -1,1 +1,10 @@
-posix_ipc
+# Comunicación Inter-Proceso (IPC)
+posix_ipc==1.1.1
+
+# Procesamiento de Datos y Métricas
+pandas==2.2.0
+numpy==1.26.0
+
+# Visualización y Gráficas
+matplotlib==3.8.0
+seaborn==0.13.0

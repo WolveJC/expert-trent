@@ -1,57 +1,85 @@
 import mmap
 import struct
 import posix_ipc
+import os
 import time
 from typing import List
 
-# Basado en protocol.h (Alineación con #pragma pack(1))
+# Configuración alineada con include/protocol.h
 SHM_NAME = "/disk_scheduler_shm"
-# ShmRegion size = Header (22 bytes aprox) + (1024 * 24 bytes de slots)
-# Usamos un tamaño generoso para el mapa inicial
-SHM_SIZE = 32768 
-
-# Formatos de struct para empaquetado binario
-# Header: magic(I), version(H), capacity(I), prod_idx(I), cons_idx(I), flags(I)
-HEADER_FORMAT = "I H I I I I"
-HEADER_SIZE = 22 # Ajustado por alineación atómica en C++
-
-# Slot: req_id(I), cylinder(I), arrival_time(d), batch_id(I), status(I)
-SLOT_FORMAT = "I I d I I"
+RING_BUFFER_CAPACITY = 1024
 SLOT_SIZE = 24
+HEADER_SIZE = 24 
+
+# Formatos de empaquetado (Little-endian)
+SLOT_FORMAT = "<I I d I I"
 
 class ShmProducer:
-    def __init__(self):
+    def __init__(self, event_fd_path="/tmp/scheduler_eventfd"):
         try:
+            # Conexión a SHM
             self.shm_obj = posix_ipc.SharedMemory(SHM_NAME)
-            self.map_file = mmap.mmap(self.shm_obj.fd, SHM_SIZE)
-        except posix_ipc.PermissionsError:
-            print("[Error] No hay permisos para acceder a SHM. ¿El motor C++ está corriendo?")
+            self.map_file = mmap.mmap(self.shm_obj.fd, 0) 
+            self.efd_path = event_fd_path
+            
+            print(f"[Producer] Conectado. Tamaño SHM: {self.map_file.size()} bytes")
+        except posix_ipc.ExistentialError:
+            print("[Error] SHM no encontrada. Inicie el motor C++ primero.")
             raise
 
+    def _notify_engine(self):
+        """
+        Envía la señal física al motor. 
+        Si el motor usa un eventfd puro, aquí escribimos en el path del FIFO/Named Pipe.
+        """
+        try:
+            # Simulamos el incremento del contador eventfd escribiendo 8 bytes (uint64)
+            # El motor C++ debe estar escuchando este path específico si no es un FD heredado.
+            if os.path.exists(self.efd_path):
+                with open(self.efd_path, "wb") as f:
+                    # 'Q' es unsigned long long (8 bytes) para eventfd
+                    f.write(struct.pack("Q", 1))
+        except Exception as e:
+            # En modo prototipo, si falla el archivo, el motor detectará el cambio por polling
+            pass
+
     def write_batch(self, requests: List[dict]):
-        # Obtener el índice actual del productor (Offset 10 en nuestro layout)
-        prod_idx_bytes = self.map_file[10:14]
-        prod_idx = struct.unpack("I", prod_idx_bytes)[0]
+        """
+        Escribe un lote y retorna el target_idx para el collector.
+        """
+        # Offset 12: Magic(4) + Version(2) + Pad(2) + Capacity(4)
+        prod_idx_offset = 12
+        
+        # Leemos el índice actual directamente de la SHM
+        prod_idx = struct.unpack("<I", self.map_file[prod_idx_offset:prod_idx_offset+4])[0]
 
         for req in requests:
-            offset = HEADER_SIZE + (prod_idx % 1024) * SLOT_SIZE
+            slot_idx = prod_idx % RING_BUFFER_CAPACITY
+            offset = HEADER_SIZE + (slot_idx * SLOT_SIZE)
             
-            # Empaquetar a binario puro
             data = struct.pack(
                 SLOT_FORMAT,
                 req['id'],
                 req['cylinder'],
-                req['time'],
+                float(req['time']),
                 req['batch_id'],
-                1 # Status: Ready
+                1 # Status: Ready (enviado)
             )
             
             self.map_file[offset:offset + SLOT_SIZE] = data
             prod_idx += 1
 
-        # Actualizar índice atómico (Notificación al motor)
-        self.map_file[10:14] = struct.pack("I", prod_idx)
+        # 1. Actualizar el producer_index en SHM (Atómico para C++)
+        self.map_file[prod_idx_offset:prod_idx_offset+4] = struct.pack("<I", prod_idx)
+        
+        # 2. Notificar al motor para que salga del estado wait()
+        self._notify_engine()
+        
+        # RETORNO CRÍTICO para evitar TypeError en main.py
+        return prod_idx
 
     def close(self):
-        self.map_file.close()
-        self.shm_obj.close_fd()
+        if hasattr(self, 'map_file') and self.map_file:
+            self.map_file.close()
+        if hasattr(self, 'shm_obj') and self.shm_obj:
+            self.shm_obj.close_fd()

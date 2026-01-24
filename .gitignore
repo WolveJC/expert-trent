@@ -48,9 +48,13 @@ bin/
 scheduler_engine
 
 # Python
-__pycache__/
+**/__pycache__/
 *.pyc
-.venv/
+**/venv/
+**/.venv/
+**/env/
+**/ENV/
 
 # System
 /dev/shm/disk_scheduler_shm
+**/results
