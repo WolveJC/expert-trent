@@ -1,92 +1,100 @@
-import mmap
-import posix_ipc
-import struct
 import time
-import random
-from reference import ScanReference
+import argparse
+import os
+from orchestrator.producer import ShmProducer
+from orchestrator.collector import ShmCollector
+from orchestrator.reference import ScanReference
+from orchestrator.generators.scenarios import ScenarioGenerator
+from orchestrator.analysis.plotter import PerformancePlotter
+from orchestrator.analysis.reporter import ExperimentReporter
 
-# Configuración estricta según protocol.h
-SHM_NAME = "/disk_scheduler_shm"
-# Header: I(4) + H(2) + I(4) + I(4) + I(4) + I(4) = 22 bytes
-# Pero C++ suele alinear el primer atomic a 4 o 8 bytes. 
-# Con #pragma pack(1), el offset de producer_index es exactamente 10.
-HEADER_FORMAT = "=I H I I I I" 
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+def run_simulation(args):
+    """
+    Ejecuta un experimento completo: Generación -> Inyección -> Recolección -> Validación.
+    """
+    # Asegurar que el directorio de resultados existe
+    output_dir = os.path.dirname(args.output)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
-SLOT_FORMAT = "=I I d I I" # I(4), I(4), d(8), I(4), I(4) = 24 bytes
-SLOT_SIZE = struct.calcsize(SLOT_FORMAT)
-RING_BUFFER_CAPACITY = 1024
+    # 1. Inicialización de componentes
+    try:
+        producer = ShmProducer()
+        collector = ShmCollector(log_file=args.output)
+        reference = ScanReference()
+        generator = ScenarioGenerator(max_cylinders=500)
+    except Exception as e:
+        print(f"[Sistema] Error crítico de inicialización: {e}")
+        print("¿Está el motor C++ corriendo y la SHM creada?")
+        return
 
-class ShmProducer:
-    def __init__(self):
-        try:
-            # Intentamos conectar a la memoria existente
-            self.shm_obj = posix_ipc.SharedMemory(SHM_NAME)
-            self.map_file = mmap.mmap(self.shm_obj.fd, 0)
-            print("[Python] Conexión establecida con el motor")
-        except posix_ipc.NoSuchEntityError:
-            print("[Error] La memoria compartida no existe. ¿Iniciaste el motor C++?")
-            raise SystemExit(1)
+    print(f"\n{'='*50}")
+    print(f" EXPERIMENTO: {args.scenario.upper()} | ALGORITMO: {args.mode.upper()}")
+    print(f"{'='*50}")
 
-    def _get_producer_idx(self):
-        # Offset 10: magic(4)+version(2)+capacity(4)
-        return struct.unpack("=I", self.map_file[10:14])[0]
+    # 2. Generación de Escenario Analítico
+    scenarios = {
+        "random": generator.random_requests,
+        "locality": generator.locality_burst,
+        "killer": generator.scan_killer
+    }
+    
+    # Obtenemos las peticiones del generador
+    requests = scenarios[args.scenario](count=args.batch_size)
 
-    def _set_producer_idx(self, val):
-        self.map_file[10:14] = struct.pack("=I", val)
+    # 3. Fase de Inyección (Python -> SHM)
+    initial_head = 0  # Punto de partida estático para validación
+    print(f"[1/4] Inyectando {len(requests)} peticiones en SHM...")
+    target_idx = producer.write_batch(requests)
 
-    def _get_consumer_idx(self):
-        # Offset 14: producer_idx(4) tras los anteriores
-        return struct.unpack("=I", self.map_file[14:18])[0]
+    # 4. Fase de Espera y Sincronización
+    print(f"[2/4] Sincronizando con Motor C++ (Esperando cons_idx >= {target_idx})...")
+    start_time = time.perf_counter()
+    
+    # El collector observa la memoria compartida hasta que el motor avance
+    success = collector.wait_for_completion(target_idx, timeout=args.timeout)
+    end_time = time.perf_counter()
 
-    def send_batch(self, requests):
-        p_idx = self._get_producer_idx()
+    if success:
+        elapsed = (end_time - start_time) * 1000 # Convertir a ms
+        print(f"[3/4] Motor respondió en {elapsed:.4f} ms.")
         
-        for req in requests:
-            offset = HEADER_SIZE + (p_idx % RING_BUFFER_CAPACITY) * SLOT_SIZE
-            data = struct.pack(
-                SLOT_FORMAT,
-                req['id'], req['cylinder'], req['time'], req['batch_id'], 1
+        # 5. Extracción de métricas
+        metrics = collector.collect_metrics(
+            batch_id=requests[0]['batch_id'], 
+            algorithm=args.mode,
+            elapsed_ms=elapsed
             )
-            self.map_file[offset:offset + SLOT_SIZE] = data
-            p_idx += 1
+        collector.save_to_csv()
+        plotter = PerformancePlotter(args.output)
+        reporter = ExperimentReporter(args.output)
+        plotter.plot_latency_comparison()
+        reporter.generate_summary()
         
-        # Actualización atómica: despierta al motor C++
-        self._set_producer_idx(p_idx)
-        return p_idx
+        # 6. Validación cruzada
+        if args.mode == "scan":
+            ref_mov, _ = reference.calculate_scan(requests, initial_head)
+        else:
+            ref_mov, _ = reference.calculate_cscan(requests, initial_head, max_cyl=500)
+            
+        print(f"[4/4] VALIDACIÓN:")
+        print(f"      - Movimiento Ref (Python): {ref_mov} cilindros")
+        print(f"      - Resultado guardado en: {args.output}")
+        print(f"\n[INFO] Compare este valor con el 'batch_movement' en el log de C++.")
+    else:
+        print(f"[ALERTA] Timeout tras {args.timeout}s. El motor no procesó el lote.")
 
-def run_experiment():
-    producer = ShmProducer()
-    reference = ScanReference()
-    
-    # 1. Generar datos (Escenario de prueba analítico)
-    test_requests = [
-        {'id': i, 'cylinder': random.randint(0, 499), 'time': time.time(), 'batch_id': 1}
-        for i in range(10)
-    ]
-    
-    print(f"[Orquestador] Enviando lote de {len(test_requests)} solicitudes...")
-    
-    # 2. Inyectar en SHM
-    initial_head = 0
-    target_idx = producer.send_batch(test_requests)
-    
-    # 3. Esperar a que el motor C++ procese (Sincronización)
-    print("[Orquestador] Esperando respuesta del motor C++...")
-    while True:
-        c_idx = producer._get_consumer_idx()
-        if c_idx >= target_idx:
-            break
-        time.sleep(0.1)
-    
-    # 4. Validación de resultados
-    ref_movement, _ = reference.calculate_scan(test_requests, initial_head)
-    print(f"\n[Resultado] Motor C++ finalizó el lote.")
-    print(f"[Validación] Movimiento esperado (Python Ref): {ref_movement}")
-    print(f"[Validación] Verifique el log del Motor C++ para contrastar.")
+    producer.close()
+    collector.close()
 
 if __name__ == "__main__":
-    try:
-        run_experiment()
-    except Exception as e:
-        print(f"[Error] {e}")
+    parser = argparse.ArgumentParser(description="Orquestador de Simulador de Disco")
+    
+    parser.add_argument("--mode", type=str, choices=["scan", "cscan"], default="scan")
+    parser.add_argument("--scenario", type=str, choices=["random", "locality", "killer"], default="random")
+    parser.add_argument("--batch-size", type=int, default=20)
+    parser.add_argument("--output", type=str, default="results/metrics.csv")
+    parser.add_argument("--timeout", type=int, default=10, help="Segundos máximos de espera")
+
+    args = parser.parse_args()
+    run_simulation(args)
