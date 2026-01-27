@@ -37,7 +37,7 @@ int main() {
     api.start();
 
     ShmRegion* region = shm.get_region();
-    utils::log_info("SYSTEM", "Motor C++ Fase 2 Activo. Esperando señales eventfd...");
+    utils::log_info("SYSTEM", "Motor C++ Activo. Esperando señales eventfd...");
 
     // Vector pre-alocado para evitar mallocs en el Hot Path (Zero-Allocation)
     std::vector<DiskRequest> batch_buffer;

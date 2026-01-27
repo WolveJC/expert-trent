@@ -12,7 +12,6 @@ void ApiServer::start() {
 void ApiServer::listen_commands() {
     std::string command;
     while (running_.load()) {
-        std::cout << "\n[API] Ingrese comando (scan, cscan, stop): " << std::flush;
         
         if (!(std::cin >> command)) break;
 
