@@ -1,12 +1,12 @@
 import time
 import argparse
 import os
-from producer import ShmProducer
-from collector import ShmCollector
-from reference import ScanReference
-from generators.scenarios import ScenarioGenerator
-from analysis.plotter import PerformancePlotter
-from analysis.reporter import ExperimentReporter
+from orchestrator.producer import ShmProducer
+from orchestrator.collector import ShmCollector
+from orchestrator.reference import ScanReference
+from orchestrator.generators.scenarios import ScenarioGenerator
+from orchestrator.analysis.plotter import PerformancePlotter
+from orchestrator.analysis.reporter import ExperimentReporter
 
 def run_simulation(args):
     """
