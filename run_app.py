@@ -61,7 +61,7 @@ class AppLauncher:
             # Inicializamos la GUI
             # Nota: main_window.py ya tiene configurado el EngineSupervisor 
             # que buscará el motor en la ruta que establecimos.
-            app = DiskSimGUI()
+            app = DiskSimGUI(engine_path=self.engine_path)
             
             try:
                 app.mainloop()

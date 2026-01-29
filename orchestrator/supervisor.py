@@ -7,23 +7,25 @@ import shutil
 from pathlib import Path
 
 class EngineSupervisor:
-    def __init__(self, bin_name="scheduler_engine"):
+    def __init__(self, bin_name="scheduler_engine", engine_path=None):
         self.os_type = platform.system()
         self.bin_name = f"{bin_name}.exe" if self.os_type == "Windows" else bin_name
         self.process = None
         self.is_running = False
+        self.external_engine_path = engine_path 
 
     def _get_executable_path(self):
         """
-        Detecta si estamos ejecutando desde el código fuente o desde un 
-        paquete congelado (PyInstaller) y localiza el binario.
+        Detecta la ruta del binario priorizando la ruta externa inyectada.
         """
+        if self.external_engine_path and os.path.exists(self.external_engine_path):
+            return self.external_engine_path
+
+        # Lógica de respaldo (Desarrollo o si falla la inyección)
         if getattr(sys, 'frozen', False):
-            # Ruta temporal donde PyInstaller extrae los archivos
-            base_path = Path(sys._MEIPASS) / "bin"
+            base_path = Path(sys._MEIPASS) / "core"
         else:
-            # Ruta de desarrollo
-            base_path = Path(__file__).parent.parent / "core" / "build"
+            base_path = Path(__file__).parent.parent / "core"
 
         exe_path = base_path / self.bin_name
         

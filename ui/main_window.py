@@ -13,14 +13,14 @@ from orchestrator.generators.scenarios import ScenarioGenerator
 from orchestrator.analysis.plotter import PerformancePlotter
 
 class DiskSimGUI(ctk.CTk):
-    def __init__(self):
+    def __init__(self, engine_path=None):
         super().__init__()
 
         self.title("DISK SCHEDULER - NEON CONTROL CONSOLE")
         self.geometry("1200x800")
         
         # Backend Components
-        self.supervisor = EngineSupervisor()
+        self.supervisor = EngineSupervisor(engine_path=engine_path)
         self.generator = ScenarioGenerator(max_cylinders=500)
         self.results_path = "results/metrics.csv"
         self.plot_path = "results/latency_comparison.png"
