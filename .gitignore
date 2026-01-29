@@ -36,6 +36,7 @@
 *.exe
 *.out
 *.app
+*.spec
 
 # debug information files
 *.dwo
@@ -45,7 +46,6 @@ build/
 bin/
 *.o
 *.out
-scheduler_engine
 
 # Python
 **/__pycache__/
