@@ -4,6 +4,7 @@
 #include "../../common/protocol.h"
 #include <vector>
 #include <cstdint>
+#include <cstddef>
 
 enum class SchedulerMode {
     SCAN,

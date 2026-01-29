@@ -1,53 +1,68 @@
 import mmap
 import struct
-import posix_ipc
 import time
+import platform
+import os
 import pandas as pd
 from datetime import datetime
 
-# Alineación con protocol.h y producer.py
-SHM_NAME = "/disk_scheduler_shm"
-HEADER_SIZE = 24
-# Offset de consumer_index: Magic(4) + Version(2) + Pad(2) + Capacity(4) + ProdIdx(4) = 16
-CONS_IDX_OFFSET = 16
+# Configuración de nombres alineada con C++ y producer.py
+SHM_NAME = "disk_scheduler_shm"  # Sin '/' para compatibilidad con Windows tagname
+CONS_IDX_OFFSET = 16            # Magic(4) + Ver(2) + Pad(2) + Cap(4) + ProdIdx(4)
 
 class ShmCollector:
     def __init__(self, log_file="results/metrics.csv"):
+        self.os_type = platform.system()
+        self.log_file = log_file
+        self.history = []
+        self.map_file = None
+        self.shm_obj = None
+
         try:
-            self.shm_obj = posix_ipc.SharedMemory(SHM_NAME)
-            # CAMBIO: Mapeo automático de tamaño
-            self.map_file = mmap.mmap(self.shm_obj.fd, 0)
-            self.log_file = log_file
-            self.history = []
-            print(f"[Collector] Conectado a SHM. Resultados se guardarán en {log_file}")
-        except posix_ipc.ExistentialError:
-            print("[Error] No se encontró SHM. El motor C++ debe estar activo.")
+            if self.os_type == "Windows":
+                # En Windows, mmap.mmap con tagname accede a la memoria nombrada
+                # 0 indica que el motor C++ ya definió el tamaño
+                self.map_file = mmap.mmap(-1, 0, tagname=SHM_NAME, access=mmap.ACCESS_READ)
+            else:
+                import posix_ipc
+                # En Linux, posix_ipc requiere el '/' inicial
+                self.shm_obj = posix_ipc.SharedMemory("/" + SHM_NAME)
+                self.map_file = mmap.mmap(self.shm_obj.fd, 0, prot=mmap.PROT_READ)
+            
+            # Asegurar que el directorio de resultados existe
+            os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+            
+            print(f"[Collector] Conectado en {self.os_type}. Guardando en {self.log_file}")
+        except Exception as e:
+            print(f"[Error Collector] No se pudo conectar a la SHM: {e}")
+            print("Asegúrese de que el motor C++ esté corriendo.")
             raise
 
     def wait_for_completion(self, target_idx, timeout=5):
         """
-        Bloquea el proceso hasta que el motor C++ alcance el índice de producción objetivo.
+        Bloquea el proceso hasta que el motor C++ procese las peticiones.
         """
         start_time = time.time()
         while time.time() - start_time < timeout:
-            # Leer consumer_index desde SHM
+            # Leer consumer_index (uint32_t) desde el offset 16
             current_cons_idx = struct.unpack("<I", self.map_file[CONS_IDX_OFFSET:CONS_IDX_OFFSET+4])[0]
             
             if current_cons_idx >= target_idx:
                 return True
-            time.sleep(0.01) # Pequeña pausa para no saturar el bus de memoria
+            time.sleep(0.01)  # Evita saturar el bus de memoria
         
         return False
 
     def collect_metrics(self, batch_id, algorithm, elapsed_ms):
         """
-        Extrae las métricas actuales del motor y las guarda en el historial.
+        Registra los resultados de un lote en la memoria temporal.
         """
         entry = {
             "timestamp": datetime.now().isoformat(),
             "batch_id": batch_id,
-            "algorithm": algorithm,
-            "processing_time_ms": elapsed_ms,
+            "algorithm": algorithm.upper(),
+            "processing_time_ms": round(elapsed_ms, 4),
+            "os": self.os_type,
             "status": "completed"
         }
         self.history.append(entry)
@@ -55,18 +70,23 @@ class ShmCollector:
 
     def save_to_csv(self):
         """
-        Persiste los datos recolectados en un archivo CSV para el módulo de análisis.
+        Persiste el historial en el archivo CSV.
         """
         if not self.history:
             return
             
         df = pd.DataFrame(self.history)
-        # Si el archivo ya existe, añade sin escribir cabecera
-        header = not pd.io.common.file_exists(self.log_file)
-        df.to_csv(self.log_file, mode='a', index=False, header=header)
-        print(f"[Collector] {len(self.history)} registros guardados en {self.log_file}")
+        # Escribir cabecera solo si el archivo no existe
+        file_exists = os.path.isfile(self.log_file)
+        df.to_csv(self.log_file, mode='a', index=False, header=not file_exists)
+        
+        print(f"[Collector] {len(self.history)} registros guardados.")
         self.history.clear()
 
     def close(self):
-        self.map_file.close()
-        self.shm_obj.close_fd()
+        """Libera los recursos de memoria."""
+        if self.map_file:
+            self.map_file.close()
+        if self.shm_obj:
+            # close_fd solo existe en el objeto posix_ipc
+            self.shm_obj.close_fd()

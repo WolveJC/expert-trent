@@ -1,56 +1,62 @@
 import mmap
 import struct
-import posix_ipc
 import os
+import platform
 import time
 from typing import List
 
-# Configuración alineada con include/protocol.h
-SHM_NAME = "/disk_scheduler_shm"
+# Configuración compartida
+SHM_NAME = "disk_scheduler_shm"  # En Win no lleva '/' inicial necesariamente
 RING_BUFFER_CAPACITY = 1024
 SLOT_SIZE = 24
-HEADER_SIZE = 24 
-
-# Formatos de empaquetado (Little-endian)
+HEADER_SIZE = 24
 SLOT_FORMAT = "<I I d I I"
 
 class ShmProducer:
     def __init__(self, event_fd_path="/tmp/scheduler_eventfd"):
+        self.os_type = platform.system()
+        self.shm_name = SHM_NAME
+        
         try:
-            # Conexión a SHM
-            self.shm_obj = posix_ipc.SharedMemory(SHM_NAME)
-            self.map_file = mmap.mmap(self.shm_obj.fd, 0) 
-            self.efd_path = event_fd_path
-            
-            print(f"[Producer] Conectado. Tamaño SHM: {self.map_file.size()} bytes")
-        except posix_ipc.ExistentialError:
-            print("[Error] SHM no encontrada. Inicie el motor C++ primero.")
+            if self.os_type == "Windows":
+                # En Windows, mmap.mmap con tagname abre la SHM existente
+                # 0 significa que el motor C++ ya la creó con el tamaño correcto
+                self.map_file = mmap.mmap(-1, 0, tagname=self.shm_name, access=mmap.ACCESS_WRITE)
+                import ctypes
+                self.set_event = ctypes.windll.kernel32.SetEvent
+                self.open_event = ctypes.windll.kernel32.OpenEventA
+                self.EVENT_MODIFY_STATE = 0x0002
+                # Abrir el evento creado por C++
+                self.h_event = self.open_event(self.EVENT_MODIFY_STATE, False, (self.shm_name + "_event").encode())
+            else:
+                import posix_ipc
+                self.shm_obj = posix_ipc.SharedMemory("/" + self.shm_name)
+                self.map_file = mmap.mmap(self.shm_obj.fd, 0)
+                self.efd_path = event_fd_path
+
+            print(f"[Producer] Conectado en {self.os_type}. SHM Size: {self.map_file.size()} bytes")
+        except Exception as e:
+            print(f"[Error] No se pudo conectar a la SHM: {e}")
             raise
 
     def _notify_engine(self):
-        """
-        Envía la señal física al motor. 
-        Si el motor usa un eventfd puro, aquí escribimos en el path del FIFO/Named Pipe.
-        """
-        try:
-            # Simulamos el incremento del contador eventfd escribiendo 8 bytes (uint64)
-            # El motor C++ debe estar escuchando este path específico si no es un FD heredado.
-            if os.path.exists(self.efd_path):
-                with open(self.efd_path, "wb") as f:
-                    # 'Q' es unsigned long long (8 bytes) para eventfd
-                    f.write(struct.pack("Q", 1))
-        except Exception as e:
-            # En modo prototipo, si falla el archivo, el motor detectará el cambio por polling
-            pass
+        """Notifica al motor C++ dependiendo del OS."""
+        if self.os_type == "Windows":
+            if self.h_event:
+                self.set_event(self.h_event)
+        else:
+            try:
+                if os.path.exists(self.efd_path):
+                    with open(self.efd_path, "wb") as f:
+                        f.write(struct.pack("Q", 1))
+            except:
+                pass
 
     def write_batch(self, requests: List[dict]):
-        """
-        Escribe un lote y retorna el target_idx para el collector.
-        """
-        # Offset 12: Magic(4) + Version(2) + Pad(2) + Capacity(4)
+        # Offset 12: Magic(4) + Version(2) + Pad(2) + Capacity(4) -> Producer Index
         prod_idx_offset = 12
         
-        # Leemos el índice actual directamente de la SHM
+        # Leer producer_index actual
         prod_idx = struct.unpack("<I", self.map_file[prod_idx_offset:prod_idx_offset+4])[0]
 
         for req in requests:
@@ -61,25 +67,22 @@ class ShmProducer:
                 SLOT_FORMAT,
                 req['id'],
                 req['cylinder'],
-                float(req['time']),
+                float(req.get('time', time.time())),
                 req['batch_id'],
-                1 # Status: Ready (enviado)
+                1 # Status: Ready
             )
             
             self.map_file[offset:offset + SLOT_SIZE] = data
             prod_idx += 1
 
-        # 1. Actualizar el producer_index en SHM (Atómico para C++)
+        # Actualizar índice y notificar
         self.map_file[prod_idx_offset:prod_idx_offset+4] = struct.pack("<I", prod_idx)
-        
-        # 2. Notificar al motor para que salga del estado wait()
         self._notify_engine()
-        
-        # RETORNO CRÍTICO para evitar TypeError en main.py
         return prod_idx
 
     def close(self):
-        if hasattr(self, 'map_file') and self.map_file:
+        if self.map_file:
             self.map_file.close()
-        if hasattr(self, 'shm_obj') and self.shm_obj:
-            self.shm_obj.close_fd()
+        if self.os_type == "Windows" and hasattr(self, 'h_event'):
+            import ctypes
+            ctypes.windll.kernel32.CloseHandle(self.h_event)
