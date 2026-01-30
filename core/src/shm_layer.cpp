@@ -76,6 +76,7 @@ bool ShmLayer::initialize() {
     region_->header.capacity = RING_BUFFER_CAPACITY;
     region_->header.producer_index.store(0, std::memory_order_release);
     region_->header.consumer_index.store(0, std::memory_order_release);
+    region_->header.last_batch_duration = 0.0;
 
     std::cout << "[shm_layer] Sinapsis establecida en " << (
 #ifdef _WIN32 

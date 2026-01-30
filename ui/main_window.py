@@ -3,14 +3,16 @@ import threading
 import time
 import os
 import pandas as pd
+import json
 from PIL import Image
 
-# Importaciones de tu lógica de orquestación
+# Importaciones de la lógica de orquestación corregida
 from orchestrator.supervisor import EngineSupervisor
 from orchestrator.producer import ShmProducer
 from orchestrator.collector import ShmCollector
 from orchestrator.generators.scenarios import ScenarioGenerator
 from orchestrator.analysis.plotter import PerformancePlotter
+from orchestrator.analysis.reporter import ExperimentReporter
 
 class DiskSimGUI(ctk.CTk):
     def __init__(self, engine_path=None):
@@ -19,7 +21,7 @@ class DiskSimGUI(ctk.CTk):
         self.title("DISK SCHEDULER - NEON CONTROL CONSOLE")
         self.geometry("1200x800")
         
-        # Backend Components
+        # Componentes Backend con inyección de ruta
         self.supervisor = EngineSupervisor(engine_path=engine_path)
         self.generator = ScenarioGenerator(max_cylinders=500)
         self.results_path = "results/metrics.csv"
@@ -32,9 +34,9 @@ class DiskSimGUI(ctk.CTk):
         self.grid_columnconfigure(1, weight=3)
         self.grid_rowconfigure(0, weight=1)
 
-        # --- PANEL LATERAL ---
+        # --- PANEL LATERAL (CONTROLES) ---
         self.sidebar = ctk.CTkFrame(self, width=250, corner_radius=0, fg_color="#1A1A1A")
-        self.sidebar.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
         
         ctk.CTkLabel(self.sidebar, text="SYSTEM\nORACLE", font=("Orbitron", 24, "bold"), text_color="#00F0FF").pack(pady=30)
 
@@ -55,7 +57,7 @@ class DiskSimGUI(ctk.CTk):
                                        command=self.start_simulation_thread)
         self.run_button.pack(pady=40, padx=20)
 
-        # --- ÁREA CENTRAL ---
+        # --- ÁREA CENTRAL (TABS) ---
         self.main_view = ctk.CTkFrame(self, fg_color="#0A0A0A")
         self.main_view.grid(row=0, column=1, sticky="nsew", padx=15, pady=15)
         
@@ -64,15 +66,16 @@ class DiskSimGUI(ctk.CTk):
         self.tabview.add("Trace Map")
         self.tabview.add("Analytics")
 
-        # --- CONSOLA ---
+        # --- CONSOLA DE SISTEMA ---
         self.console_box = ctk.CTkTextbox(self.main_view, height=140, font=("JetBrains Mono", 12), 
                                          fg_color="#050505", text_color="#00FF41", border_color="#333", border_width=1)
         self.console_box.pack(fill="x", padx=10, pady=10)
-        self.log("NUCLEO LISTO. Inserte parámetros de simulación.")
+        self.log("NUCLEO LISTO. Esperando parámetros de simulación.")
 
     def _setup_canvas(self):
         self.canvas = ctk.CTkCanvas(self.tabview.tab("Trace Map"), bg="#050505", highlightthickness=0)
         self.canvas.pack(expand=True, fill="both")
+        # Eje de cilindros
         self.canvas.create_line(50, 550, 750, 550, fill="#333", width=2)
         for i in range(0, 501, 100):
             x = 50 + (i * (700/500))
@@ -91,7 +94,7 @@ class DiskSimGUI(ctk.CTk):
         def draw_step(i, px, py):
             if i >= len(sequence):
                 self.log("Visualización de rastro completada.")
-                self.update_analytics() # Actualiza analytics al terminar
+                self.update_analytics()
                 self.after(800, lambda: self.tabview.set("Analytics"))
                 return
             nx = margin_x + (sequence[i] * (width / 500))
@@ -104,68 +107,53 @@ class DiskSimGUI(ctk.CTk):
         draw_step(1, start_x, 40)
 
     def update_analytics(self):
-        """Genera datos, limpia la pestaña y construye la vista de reporte + imagen"""
+        """Genera gráficos y reportes usando el Reporter y el Plotter"""
         for widget in self.tabview.tab("Analytics").winfo_children():
             widget.destroy()
 
-        # Contenedor con Scroll para albergar reporte e imagen
         scroll_frame = ctk.CTkScrollableFrame(self.tabview.tab("Analytics"), fg_color="transparent")
         scroll_frame.pack(expand=True, fill="both", padx=5, pady=5)
 
-        # 1. Generar la gráfica físicamente
         try:
+            # 1. Ejecutar Plotter para generar PNG
             plotter = PerformancePlotter(self.results_path)
             plotter.plot_latency_comparison()
-        except Exception as e:
-            self.log(f"Error al generar gráfico: {e}")
 
-        # 2. SECCIÓN: TABLA COMPARATIVA
-        report_text = self._get_comparison_data()
-        comparison_box = ctk.CTkTextbox(scroll_frame, height=120, font=("JetBrains Mono", 13),
-                                        fg_color="#121212", border_color="#00F0FF", border_width=1)
-        comparison_box.pack(fill="x", padx=10, pady=10)
-        comparison_box.insert("0.0", report_text)
-        comparison_box.configure(state="disabled")
+            # 2. Ejecutar Reporter para generar estadísticas
+            reporter = ExperimentReporter(self.results_path)
+            stats_df = reporter.generate_summary()
+            
+            # 3. Mostrar reporte de texto formateado
+            report_text = self._get_formatted_report(stats_df)
+            comparison_box = ctk.CTkTextbox(scroll_frame, height=160, font=("JetBrains Mono", 13),
+                                            fg_color="#121212", border_color="#00F0FF", border_width=1)
+            comparison_box.pack(fill="x", padx=10, pady=10)
+            comparison_box.insert("0.0", report_text)
+            comparison_box.configure(state="disabled")
 
-        # 3. SECCIÓN: VISUALIZACIÓN DE IMAGEN (Matplotlib)
-        if os.path.exists(self.plot_path):
-            try:
+            # 4. Mostrar la imagen generada
+            if os.path.exists(self.plot_path):
                 raw_img = Image.open(self.plot_path)
-                # Ajustar imagen a un tamaño visible en el frame
-                ctk_img = ctk.CTkImage(light_image=raw_img, dark_image=raw_img, size=(700, 450))
+                ctk_img = ctk.CTkImage(light_image=raw_img, dark_image=raw_img, size=(700, 400))
                 img_label = ctk.CTkLabel(scroll_frame, image=ctk_img, text="")
                 img_label.pack(pady=10)
-            except Exception as e:
-                self.log(f"Error al cargar PNG: {e}")
-                self._show_error_label(scroll_frame, "Error al procesar archivo de imagen.")
-        else:
-            self._show_error_label(scroll_frame, "Archivo de analítica no encontrado.")
 
-    def _get_comparison_data(self):
-        """Extrae métricas del CSV para el reporte de texto"""
-        try:
-            df = pd.read_csv(self.results_path)
-            if len(df) < 2: return "Esperando más datos para comparativa..."
-            stats = df.groupby('algorithm')['processing_time_ms'].mean()
-            
-            res = ">>> REPORTE DE EFICIENCIA DEL SISTEMA <<<\n"
-            if "scan" in stats and "c-scan" in stats:
-                s, cs = stats['scan'], stats['c-scan']
-                diff = abs(s - cs)
-                best = "C-SCAN" if cs < s else "SCAN"
-                perc = (diff / max(s, cs)) * 100
-                res += f"- SCAN promedio: {s:.3f} ms\n- C-SCAN promedio: {cs:.3f} ms\n"
-                res += f"- CONCLUSIÓN: {best} es {perc:.1f}% más rápido en este escenario."
-            else:
-                res += f"Algoritmo actual: {df['algorithm'].iloc[-1].upper()}\n"
-                res += f"Tiempo promedio: {stats.iloc[0]:.3f} ms\n"
-                res += "Consejo: Ejecute el otro algoritmo para obtener comparativa."
-            return res
-        except:
-            return "Error al leer métricas. Asegúrese de que results/metrics.csv existe."
+        except Exception as e:
+            self.log(f"Error en post-procesamiento: {e}")
 
-    def _show_error_label(self, parent, text):
-        ctk.CTkLabel(parent, text=f"⚠ {text}", font=("Orbitron", 14), text_color="#FF4B4B").pack(pady=50)
+    def _get_formatted_report(self, df):
+        if df is None or df.empty:
+            return ">>> SIN DATOS DISPONIBLES <<<"
+        
+        res = ">>> REPORTE DE TELEMETRÍA C++ <<<\n"
+        res += "-" * 60 + "\n"
+        res += f"{'ALGORITMO':<12} | {'MEDIA (ms)':<12} | {'MIN':<10} | {'MAX':<10}\n"
+        res += "-" * 60 + "\n"
+        
+        for _, row in df.iterrows():
+            res += f"{row['Algoritmo']:<12} | {row['Media (ms)']:<12.6f} | {row['Mín (ms)']:<10.4f} | {row['Máx (ms)']:<10.4f}\n"
+        
+        return res
 
     def start_simulation_thread(self):
         self.run_button.configure(state="disabled", text="PROCESANDO...")
@@ -185,22 +173,28 @@ class DiskSimGUI(ctk.CTk):
 
             producer = ShmProducer()
             collector = ShmCollector(log_file=self.results_path)
-            scenarios = {"random": self.generator.random_requests, 
-                         "locality": self.generator.locality_burst, 
-                         "killer": self.generator.scan_killer}
+            
+            scenarios = {
+                "random": self.generator.random_requests, 
+                "locality": self.generator.locality_burst, 
+                "killer": self.generator.scan_killer
+            }
             
             requests = scenarios[scenario_name](count=count)
             cyl_list = [r['cylinder'] for r in requests]
             target_idx = producer.write_batch(requests)
 
+            # Sincronización con telemetría real
             if collector.wait_for_completion(target_idx):
-                collector.collect_metrics(requests[0]['batch_id'], mode, 0) # El motor C++ ya mide su tiempo
+                # Importante: collect_metrics ahora lee el tiempo directamente de la SHM
+                collector.collect_metrics(requests[0]['batch_id'], mode)
                 collector.save_to_csv()
                 self.after(0, lambda: self.animate_trace(cyl_list))
             else:
-                self.log("ERROR: Timeout del Motor C++.")
+                self.log("ERROR: Tiempo de espera agotado (Motor no responde).")
+                
         except Exception as e:
-            self.log(f"CRITICAL ERROR: {str(e)}")
+            self.log(f"ERROR CRÍTICO: {str(e)}")
         finally:
             self.supervisor.stop_engine()
             self.after(0, lambda: self.run_button.configure(state="normal", text="EJECUTAR SECUENCIA"))

@@ -1,7 +1,7 @@
 #include "../include/shm_layer.h"
 #include "../include/scheduler_core.h"
-#include "../include/api_server.h" // Incluimos la lógica de control asíncrono
-#include "../include/utils.h"      // Herramientas
+#include "../include/api_server.h" 
+#include "../include/utils.h"
 #include <iostream>
 #include <vector>
 #include <atomic>
@@ -62,20 +62,21 @@ int main() {
                 c_idx++;
             }
 
-            // 6. Ejecución y Medición
+            // 6. Ejecución y Medición de Alta Precisión
             double start_time = utils::get_timestamp_now();
-            
             uint32_t batch_movement = scheduler.execute_batch(batch_buffer, current_mode);
-            
             double end_time = utils::get_timestamp_now();
+            double duration = end_time - start_time;
 
-            // 7. Registro de Resultados y Retroalimentación
+            // 7. Registro de Resultados y Canal de Telemetría
+            // IMPORTANTE: Escribimos la duración ANTES de actualizar el índice de consumo
+            region->header.last_batch_duration = duration; 
             region->header.consumer_index.store(c_idx, std::memory_order_release);
 
             // Logging 
             std::string log_msg = "Batch procesado [" + std::to_string(batch_buffer.size()) + 
                                   " reqs] Mov: " + std::to_string(batch_movement) + 
-                                  " Tiempo: " + std::to_string(end_time - start_time) + "s";
+                                  " Tiempo: " + std::to_string(duration) + "s";
             utils::log_info("ENGINE", log_msg);
         }
     }

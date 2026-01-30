@@ -6,9 +6,12 @@ import os
 import pandas as pd
 from datetime import datetime
 
-# Configuración de nombres alineada con C++ y producer.py
-SHM_NAME = "disk_scheduler_shm"  # Sin '/' para compatibilidad con Windows tagname
-CONS_IDX_OFFSET = 16            # Magic(4) + Ver(2) + Pad(2) + Cap(4) + ProdIdx(4)
+# Configuración de nombres alineada con protocol.h
+SHM_NAME = "disk_scheduler_shm"
+# Offset corregido para Consumer Index (ahora es 14 según la estructura C++)
+CONS_IDX_OFFSET = 14 
+# Nuevo offset para el tiempo (justo después de flags)
+DURATION_OFFSET = 22 
 
 class ShmCollector:
     def __init__(self, log_file="results/metrics.csv"):
@@ -20,48 +23,55 @@ class ShmCollector:
 
         try:
             if self.os_type == "Windows":
-                # En Windows, mmap.mmap con tagname accede a la memoria nombrada
-                # 0 indica que el motor C++ ya definió el tamaño
                 self.map_file = mmap.mmap(-1, 0, tagname=SHM_NAME, access=mmap.ACCESS_READ)
             else:
                 import posix_ipc
-                # En Linux, posix_ipc requiere el '/' inicial
                 self.shm_obj = posix_ipc.SharedMemory("/" + SHM_NAME)
                 self.map_file = mmap.mmap(self.shm_obj.fd, 0, prot=mmap.PROT_READ)
             
-            # Asegurar que el directorio de resultados existe
             os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
-            
-            print(f"[Collector] Conectado en {self.os_type}. Guardando en {self.log_file}")
+            print(f"[Collector] Conectado. Escuchando telemetría en offset {DURATION_OFFSET}")
         except Exception as e:
-            print(f"[Error Collector] No se pudo conectar a la SHM: {e}")
-            print("Asegúrese de que el motor C++ esté corriendo.")
+            print(f"[Error Collector] {e}")
             raise
 
     def wait_for_completion(self, target_idx, timeout=5):
-        """
-        Bloquea el proceso hasta que el motor C++ procese las peticiones.
-        """
+        """Bloquea hasta que el motor procese las peticiones."""
         start_time = time.time()
         while time.time() - start_time < timeout:
-            # Leer consumer_index (uint32_t) desde el offset 16
+            # Leemos 4 bytes (I = uint32)
             current_cons_idx = struct.unpack("<I", self.map_file[CONS_IDX_OFFSET:CONS_IDX_OFFSET+4])[0]
-            
             if current_cons_idx >= target_idx:
                 return True
-            time.sleep(0.01)  # Evita saturar el bus de memoria
-        
+            time.sleep(0.01)
         return False
 
-    def collect_metrics(self, batch_id, algorithm, elapsed_ms):
+    def get_last_duration(self):
         """
-        Registra los resultados de un lote en la memoria temporal.
+        Extrae el tiempo real de procesamiento (double = 8 bytes) desde la SHM.
         """
+        try:
+            # "d" es el formato para double (8 bytes) en struct.unpack
+            raw_duration = struct.unpack("<d", self.map_file[DURATION_OFFSET:DURATION_OFFSET+8])[0]
+            # Convertimos segundos a milisegundos para el reporte
+            return raw_duration * 1000.0
+        except Exception as e:
+            print(f"[Collector] Error leyendo duración: {e}")
+            return 0.0
+
+    def collect_metrics(self, batch_id, algorithm, elapsed_ms=None):
+        """
+        Registra los resultados. Si elapsed_ms es None, lo lee de la SHM.
+        """
+        # Si no nos pasan el tiempo, lo buscamos en el "buzón" de la SHM
+        if elapsed_ms is None:
+            elapsed_ms = self.get_last_duration()
+
         entry = {
             "timestamp": datetime.now().isoformat(),
             "batch_id": batch_id,
             "algorithm": algorithm.upper(),
-            "processing_time_ms": round(elapsed_ms, 4),
+            "processing_time_ms": round(elapsed_ms, 6), # Más precisión para ver los picos
             "os": self.os_type,
             "status": "completed"
         }
@@ -69,24 +79,12 @@ class ShmCollector:
         return entry
 
     def save_to_csv(self):
-        """
-        Persiste el historial en el archivo CSV.
-        """
-        if not self.history:
-            return
-            
+        if not self.history: return
         df = pd.DataFrame(self.history)
-        # Escribir cabecera solo si el archivo no existe
         file_exists = os.path.isfile(self.log_file)
         df.to_csv(self.log_file, mode='a', index=False, header=not file_exists)
-        
-        print(f"[Collector] {len(self.history)} registros guardados.")
         self.history.clear()
 
     def close(self):
-        """Libera los recursos de memoria."""
-        if self.map_file:
-            self.map_file.close()
-        if self.shm_obj:
-            # close_fd solo existe en el objeto posix_ipc
-            self.shm_obj.close_fd()
+        if self.map_file: self.map_file.close()
+        if self.shm_obj: self.shm_obj.close_fd()

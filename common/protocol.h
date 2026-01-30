@@ -16,28 +16,35 @@
  * Tamaño: 24 bytes (Alineación natural para tipos de 64 y 32 bits)
  */
 struct DiskRequest {
-    uint32_t request_id;   // Identificador único [cite: 27]
-    uint32_t cylinder;     // Posición en el disco [cite: 27]
-    double arrival_time;   // Tiempo de llegada (señalización química/temporal) [cite: 28]
-    uint32_t batch_id;     // ID del lote para procesamiento agrupado [cite: 28]
-    uint32_t status;       // 0: Vacío, 1: Listo, 2: Procesado [cite: 28]
+    uint32_t request_id;   // Identificador único
+    uint32_t cylinder;     // Posición en el disco
+    double arrival_time;   // Tiempo de llegada (señalización química/temporal)
+    uint32_t batch_id;     // ID del lote para procesamiento agrupado
+    uint32_t status;       // 0: Vacío, 1: Listo, 2: Procesado
 };
 
 /**
  * Header de la Memoria Compartida
- * Contiene los metadatos y los índices atómicos de control [cite: 23, 24]
+ * Contiene los metadatos, índices de control y canal de métricas.
  */
 struct ShmHeader {
-    uint32_t magic;            // Identificador [cite: 24]
-    uint16_t version;          // Versión del protocolo [cite: 24]
-    uint32_t capacity;         // Número de slots [cite: 24]
+    uint32_t magic;            // Identificador
+    uint16_t version;          // Versión del protocolo
+    uint32_t capacity;         // Número de slots
     
-    // Índices atómicos para sincronización Lockless (SPSC) [cite: 25, 40]
-    // Usamos std::atomic para garantizar visibilidad entre hilos/procesos
+    // Índices atómicos para sincronización Lockless (SPSC)
     std::atomic<uint32_t> producer_index; 
     std::atomic<uint32_t> consumer_index;
     
-    uint32_t flags;            // Banderas de estado (ej: modo debug) [cite: 25]
+    uint32_t flags;            // Banderas de estado (ej: modo debug)
+
+    /**
+     * CANAL DE TELEMETRÍA:
+     * El motor C++ escribirá aquí el tiempo de ejecución del último lote.
+     * Al estar antes del buffer y dentro de la estructura empaquetada,
+     * Python podrá leerlo con el mismo offset.
+     */
+    double last_batch_duration; 
 };
 
 /**
@@ -45,7 +52,7 @@ struct ShmHeader {
  */
 struct ShmRegion {
     ShmHeader header;
-    DiskRequest buffer[RING_BUFFER_CAPACITY]; // Ring Buffer de entradas [cite: 26]
+    DiskRequest buffer[RING_BUFFER_CAPACITY]; // Ring Buffer de entradas
 };
 
 #pragma pack(pop)
